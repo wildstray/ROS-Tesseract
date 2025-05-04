@@ -1,12 +1,19 @@
 # ROS-Tesseract
-Mikrotik RouterOS configurable TUI NMS
+MikroTik RouterOS configurable TUI NMS
 
 ## Description
 
 ROS Tesseract is an high configurable TUI near realtime NMS. It uses RouterOS API for reading values and displaying it on a TUI (curses). Using a single JSON configuration file you can design your own monitor with your custom graphics.
 It supports colors (totally configurable), displaying datas as tables, gauges and plots, dynamic resizing when terminal is resized (when it's too little, boxes that would exit out of the screen are temorarily pruned). 
 
+![screnshot](screenshot.png)
+
+## Background
+
+This was written from scratch and for my own use, to monitor an LTE router (my broadband backup). Then I thought that often TUIs are underrated and this could be an inspiration. Moreover, also MikroTik routers are underrated (at least in my country, in Italy). 
 The name is inspired to sci-fi Insterstellar, because in internal structure I translate a two-dimensional structure into a linear flow, while maintaining the spatial semantics. As the Insterstellar Tesseract is a three dimensional representation of five dimensional space.
+
+NB: I'm not affiliated at all with MikroTik... but if you need consultancy on MikroTik routers (or any other one), on network and software architectures, on Python programming (or with any other language), on GNU/Linux (or any other *nix system), on FOSS... you could hire me :-)
 
 ## Configuration
 
