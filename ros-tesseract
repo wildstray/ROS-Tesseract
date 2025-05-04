@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+from asciichartpy import plot
+from collections import defaultdict, deque
+import curses
+import datetime
+import itertools
+import json
+from ros_api import Api
+from ros_api.api import RouterOSTrapError,LoginError,CreateSocketError
+from tabulate import tabulate
+import time
+from threading import Thread, Event
+from types import SimpleNamespace
+import signal
+import sys
+
+MINWIDTH = 70
+ROSTIMEOUT = 10
+
+boxes = defaultdict(list)
+deques = defaultdict(deque)
+heights = []
+results = defaultdict(list)
+
+def gety(column, pos):
+    return sum(list(itertools.chain(*heights))[:pos]) - sum([sum(heights[i]) for i in range(column)])
+
+def geth(pos):
+    return list(itertools.chain(*heights))[pos]
+
+def getminyx():
+    return max([sum(heights[i]) for i in range(len(heights))])+3, len(heights)*MINWIDTH
+
+def getmaxcol():
+    maxy, maxx = stdscr.getmaxyx()
+    return maxx//(MINWIDTH+2)
+
+def sigWinch(signum, frame):
+    curses.endwin()
+    curses.initscr() 
+    resize.set()
+
+def sigInt(signum, frame):
+    quit.set()
+
+def sigTerm(signum, frame):
+    quit.set()
+
+def exceptionHook(exctype, value, traceback):
+    quit.set()
+    print("ERROR: %s" % value)
+
+class poller(Thread):
+    def __init__(self, event, config):
+        Thread.__init__(self)
+        self.stopped = event
+        self.config = config
+        try:
+            self.router = Api(config.get('ros').get('address'), user=config.get('ros').get('user'), password=config.get('ros').get('password'), 
+                timeout=int(config.get('ros').get('timeout',ROSTIMEOUT)), use_ssl=config.get('ros').get('use_ssl',False))
+        except CreateSocketError as e:
+            print('ERROR: %s' % str(e))
+            sys.exit(1)
+        except LoginError:
+            print('Invalid user name or password!')
+            sys.exit(1)
+        except AttributeError:
+            print('Error or missing parameter in configuration!')
+            sys.exit(1)
+        try:
+            r = self.router.talk(('/system/identity/print'))
+        except RouterOSTrapError:
+            print ("Error querying RouterOS")
+            sys.exit(1)
+        self.calcHeights()
+
+    def calcHeights(self):
+        for pos, item in enumerate(filter(lambda x: x.get('disabled', False) == False, sorted(self.config.get('boxes',[]), key=lambda x: x['column']))):
+            column = item.get('column')
+            if column not in range(len(heights)):
+                heights.append([])
+            if 'height' in item:
+                heights[column].append(item.get('height',0) + item.get('padding',0) + 4)
+            else:
+                try:
+                    r = self.router.talk(tuple(item.get('query')))
+                except RouterOSTrapError:
+                    print ("Error querying RouterOS")
+                    sys.exit(1)
+                if r == []:
+                    heights[column].append(4)
+                    continue
+                heights[column].append(len(r[0]) + item.get('padding',0) + 4)
+
+    def run(self):
+        global boxconfig
+        while not self.stopped.wait(0.5):
+            for pos, item in enumerate(boxconfig):
+                try:
+                    r = self.router.talk(tuple(item.get('query')))
+                    results[pos] = r
+                except RouterOSTrapError:
+                    pass
+                if not self.stopped:
+                    break
+
+class quitter(Thread):
+    def __init__(self, event):
+        Thread.__init__(self)
+        self.stopped = event
+
+    def run(self):
+        while not self.stopped.wait(0.1):
+            key = stdscr.getch()
+            if key == ord('q') or key == 27:
+                quit.set()
+                break
+
+class GUI(Thread):
+    def __init__(self, event, config):
+        Thread.__init__(self)
+        self.stopped = event
+        self.config = config
+
+        stdscr.nodelay(True)
+        curses.noecho()
+        curses.cbreak()
+        if curses.has_colors():
+            curses.start_color()
+            curses.use_default_colors()
+        stdscr.border(0)
+        curses.curs_set(0)
+
+        colors = {"COLOR_BLACK": curses.COLOR_BLACK, "COLOR_RED": curses.COLOR_RED, "COLOR_GREEN": curses.COLOR_GREEN, 
+                  "COLOR_YELLOW": curses.COLOR_YELLOW, "COLOR_BLUE": curses.COLOR_BLUE, "COLOR_MAGENTA": curses.COLOR_MAGENTA,
+                  "COLOR_CYAN": curses.COLOR_CYAN, "COLOR_WHITE": curses.COLOR_WHITE}
+        if curses.has_colors():
+            for item in config.get('colorpairs',[]):
+                curses.init_pair(item.get('pair', 0), colors.get(item.get('fg', curses.COLOR_WHITE)), colors.get(item.get('bg', curses.COLOR_BLACK)))
+            stdscr.bkgd(curses.color_pair(config.get('color',0)))
+
+    def drawBoxes(self):
+        global boxconfig
+        maxy, maxx = stdscr.getmaxyx()
+        maxc = getmaxcol()
+        width = (maxx-2)//maxc
+        for pos, item in enumerate(boxconfig):
+            column = item.get('column',0)
+            adj = (maxx-2)%maxc if column & (maxc - 1) else 0
+            if self.checkExceed(column, pos):
+                continue
+            boxes[pos] = curses.newwin(geth(pos), width + adj, gety(column, pos) + 1, width * column + 1)
+            boxes[pos].attron(curses.color_pair(item.get('color',0)))
+            boxes[pos].box()
+            boxes[pos].bkgd(' ', curses.color_pair(item.get('color',0)))
+            boxes[pos].attroff(curses.color_pair(item.get('color',0)))
+
+    def checkResize(self):
+        global boxconfig
+        if resize.is_set():
+            resize.clear()
+
+            stdscr.nodelay(True)
+            stdscr.refresh()
+            stdscr.clear()
+            miny, minx = getminyx()
+            maxy, maxx = stdscr.getmaxyx()
+            stdscr.refresh()
+            stdscr.bkgd(curses.color_pair(self.config.get('color',0)))
+            if miny > maxy or minx > maxx:
+
+                warn = curses.newwin(7, 38, maxy//2 - 4, maxx//2 - 19)
+                warn.attron(curses.color_pair(self.config.get('color',0)))
+                warn.box()
+                warn.bkgd(' ', curses.color_pair(self.config.get('color',0)))
+                warn.addstr(3, 2, "Warning! Terminal size too small!", curses.color_pair(self.config.get('color',0)))
+                warn.attroff(curses.color_pair(self.config.get('color',0)))
+                stdscr.border(0)
+                stdscr.refresh()
+                warn.refresh()
+                time.sleep(5)
+
+            stdscr.clear()
+            boxconfig = list(filter(lambda x: x.get('disabled', False) == False and x.get('column') < getmaxcol(), sorted(self.config.get('boxes',[]), key=lambda x: x['column'])))
+            self.drawBoxes()
+            stdscr.border(0)
+            stdscr.refresh()
+
+    def checkExceed(self, column, pos):
+        maxy, maxx = stdscr.getmaxyx()
+        return (geth(pos) + gety(column, pos) + 1 > maxy - 2)
+
+    def run(self):
+        global boxconfig
+        while not self.stopped.wait(1):
+            self.checkResize()
+            for pos, item in enumerate(boxconfig):
+                column = item.get('column',0)
+                if self.checkExceed(column, pos):
+                    continue
+                boxes[pos].bkgd(' ', curses.color_pair(item.get('color',0)))
+                boxes[pos].addstr(0, 1, "[ %s ]" % item.get('name'), curses.A_BOLD | curses.color_pair(item.get('color',0)))
+                r = results[pos]
+                if r == []:
+                    continue
+                boxh, boxw = boxes[pos].getmaxyx()
+                if len(r) > 1:
+                    r = list(filter(lambda x: x.get('.section') != '0', r))
+                    r = list(map(lambda x: dict(filter(lambda item: not item[0].startswith('.'), x.items())), r))
+                    table = list(map(lambda x: x.values(), r))
+                    headers = r[0].keys()
+                    y = 1
+                    for line in tabulate(table, headers, tablefmt="plain", preserve_whitespace=True).split('\n'):
+                        y += 1
+                        if y > boxh - 2:
+                            break
+                        if y == 2:
+                            try:
+                                boxes[pos].addstr(y, 2, line, curses.A_BOLD | curses.color_pair(item.get('color',0)))
+                            except curses.error:
+                                pass
+                            y += 1
+                        else:
+                            try:
+                                boxes[pos].addstr(y, 2, line, curses.color_pair(item.get('color',0)))
+                            except curses.error:
+                                pass
+                else:
+                    if item.get('gauge', False):
+                        v = float(list(r[0].values())[0])
+                        from random import randrange
+                        text = ' %d %s' % (v, item.get('units'))
+                        c = int((boxw/100.0) * (100.0/(item.get('max')-item.get('min'))*abs(v-item.get('min'))) - 4 - len(text))
+                        boxes[pos].addstr(2, 1, ' ' * (boxw - 2), curses.color_pair(item.get('color',0)))
+                        boxes[pos].addstr(2, 2, '█' * c + text, curses.color_pair(item.get('color',0)))
+                    elif item.get('graph', False):
+                        v = float(list(r[0].values())[0])
+                        deques[pos].append(v)
+                        #if len(deques[pos]) > boxw - 12 - 3:
+                        if len(deques[pos]) > item.get('interval'):
+                            deques[pos].popleft()
+                        lines = plot(deques[pos], {'format':'{:4.0f}', 'height': boxh - 5, 'minimum': item.get('min'), 'maximum': item.get('max')}).split('\n')
+                        lines.append(' ' * (len('{:4.0f}'.format(0)) + 1) + '└' + '┬' * 60)
+                        x = list(range(-item.get('interval',60)+1,1))
+                        textmin = '%d' % min(x)
+                        textmax = '%d' % max(x)
+                        units = item.get('units')
+                        lines.append(' ' * (len('{:4.0f}'.format(0)) + 1) + textmin + ' ' * (60//2 - len(textmin)) + units + ' ' * (60//2 - len(units)) + textmax)
+                        y = 1
+                        for line in lines:
+                            y += 1
+                            if y > boxh - 2:
+                                break
+                            try:
+                                boxes[pos].addstr(y, 2, line, curses.color_pair(item.get('color',0)))
+                            except curses.error:
+                                pass
+                    else:
+                        table = list(map(lambda x: [x, r[0][x]], r[0]))
+                        table.append([" "*20])
+                        headers = []
+                        y = 1
+                        for line in tabulate(table, headers, tablefmt="plain", preserve_whitespace=True).split('\n'):
+                            y += 1
+                            if y > boxh - 2:
+                                break
+                            try:
+                                boxes[pos].addstr(y, 2, line, curses.color_pair(item.get('color',0)))
+                            except curses.error:
+                                pass
+                boxes[pos].refresh()
+            self.status()
+
+    def status(self):
+        maxy, maxx = stdscr.getmaxyx()
+        stdscr.addstr(maxy - 2, 1, " " * (maxx - 2), curses.color_pair(self.config.get('color',0)) | curses.A_BOLD | curses.A_REVERSE)
+        stdscr.addstr(maxy - 2, 1, "MONITORING %s (%s)" % (self.config.get('ros').get('address'), self.config.get('ros').get('user')), curses.color_pair(self.config.get('color',0)) | curses.A_BOLD | curses.A_REVERSE)
+        term = "TERMINAL %dx%d" % (maxx, maxy)
+        stdscr.addstr(maxy - 2, maxx//2-len(term)//2 - 1, term, curses.color_pair(self.config.get('color',0)) | curses.A_BOLD | curses.A_REVERSE)
+        dt = datetime.datetime.today().strftime('%x %X')
+        stdscr.addstr(maxy - 2, maxx - len(dt) - 1, "%s" % dt, curses.color_pair(self.config.get('color',0)) | curses.A_BOLD | curses.A_REVERSE)
+        stdscr.refresh()
+
+quit = Event()
+resize = Event()
+
+def main(screen):
+    global boxconfig
+    global stdscr
+    stdscr = screen
+
+    cfgfile = "%s.json" % sys.argv[0]
+    if len(sys.argv) > 1:
+        cfgfile = sys.argv[1]
+
+    with open(cfgfile) as f:
+        try:
+            config = json.load(f)
+        except json.decoder.JSONDecodeError:
+            print('Error in configuration format!')
+            sys.exit(1)
+        finally:
+            f.close()
+
+    if not 'boxes' in config:
+        print('Please configure some monitor box!')
+        sys.exit(1)
+
+    sys.excepthook = exceptionHook
+    signal.signal(signal.SIGWINCH, sigWinch)
+    signal.signal(signal.SIGINT, sigInt)
+    signal.signal(signal.SIGTERM, sigTerm)
+
+    tPoller = poller(quit, config)
+    tQuitter = quitter(quit)
+    tGUI = GUI(quit, config)
+
+    boxconfig = list(filter(lambda x: x.get('disabled', False) == False and x.get('column') < getmaxcol(), sorted(config.get('boxes',[]), key=lambda x: x['column'])))
+    resize.set()
+
+    tGUI.drawBoxes()
+    tPoller.start()
+    tQuitter.start()
+    tGUI.start()
+    tPoller.join()
+    tQuitter.join()
+    tGUI.join()
+
+if __name__ == '__main__':
+    curses.wrapper(main)
