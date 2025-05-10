@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-from asciichartpy import plot
 from collections import defaultdict, deque
 import curses
 import datetime
 import itertools
 import json
+import math
+import numpy as np
 from ros_api import Api
 from ros_api.api import RouterOSTrapError,LoginError,CreateSocketError
 from tabulate import tabulate
 import time
+import threading
 from threading import Thread, Event
-from types import SimpleNamespace
+import traceback
 import signal
 import sys
 
@@ -23,31 +25,106 @@ results = defaultdict(list)
 quit = Event()
 resize = Event()
 
+def textGauge(value, width=50, min=0, max=100, units=None):
+    # Creates a text-bases gauge
+    descr = " %d %s" % (value, units)
+    stars = int(((width-len(descr)-2)/100.0)*(100.0/(max-min)*abs(value-min)))
+    spaces = width-stars-len(descr)-2
+    gauge = "[%s%s%s]" % ("*"*stars, " "*spaces, descr)
+    return gauge
+
+def textPlot(data, width=50, height=20, samples=60, type="line", units="", format=".1f"):
+    # Creates a text-bases line or bars plot
+
+    # Scale settings
+    data_min = min(data)
+    data_max = max(data)
+    if data_min == data_max:
+        data_min = np.mean(data) - abs(np.mean(data)//10)
+        data_max = np.mean(data) + abs(np.mean(data)//10)
+    data_range = abs(data_max - data_min)
+    y_scale = height / data_range
+    x_scale = samples / width
+
+    # Create empty plot
+    canvas = [[" " for _ in range(width + 6)] for _ in range(height + 2)]
+
+    # Draw axes
+    for i in range(height):
+        canvas[height - i - 1][5] = "|"
+    canvas[height][5] = "+"
+    canvas[height][6:] = ["-" for _ in range(width)]
+
+    # Add Y-axis labels
+    for i, y in enumerate(range(0, height, height // 5)):
+        label = format.format(data_min + i * data_range / 5)
+        canvas[height - y - 1][0:len(label)] = label
+
+    if type=="line":
+        # Plot interpolated line graph
+        x_original = np.linspace(0, len(data) - 1, len(data))
+        x_interpolated = np.linspace(0, len(data) - 1, width * 10)
+        data_interpolated = np.interp(x_interpolated, x_original, data)
+        for i in range(width * 10):
+            x_idx = int(i / 10)
+            if x_idx >= len(data):
+                continue
+            y_val = data_interpolated[i]
+            y_idx = height - 1 - int((y_val - data_min - 2) * y_scale)
+            if 0 <= x_idx < width and 0 <= y_idx < height:
+                canvas[y_idx][x_idx + 6] = "*"
+
+    elif type=="bars":
+        # Plot bar graph
+        for i in range(width):
+            x_idx = int(i * x_scale)
+            if x_idx >= len(data):
+                continue
+            y_val = data[x_idx]
+            y_height = int((y_val - data_min - 2) * y_scale)
+            for j in range(y_height+1):
+                y_idx = height - 1 - j
+                if 0 <= y_idx < height:
+                    canvas[y_idx][i + 6] = "*"
+
+    # Add X-axis label
+    canvas[height + 1] = " " * 6 + " " * (width//2-len(units)//2) + units
+
+    return ["".join(row) for row in canvas]
+
 def gety(column, pos):
+    """Get y for box in specified column and position"""
     return sum(list(itertools.chain(*heights))[:pos]) - sum([sum(heights[i]) for i in range(column)])
 
 def geth(pos):
+    """Get height of box in specified position"""
     return list(itertools.chain(*heights))[pos]
 
 def getminyx():
+    """Get minimum size of terminal required for all configured and enabled boxes"""
     return max([sum(heights[i]) for i in range(len(heights))])+3, len(heights)*MINWIDTH
 
 def sigWinch(signum, frame):
+    """SIGWINCH handler: terminal resized"""
     curses.endwin()
     curses.initscr() 
     resize.set()
 
 def sigInt(signum, frame):
+    """SIGINT handler."""
     quit.set()
 
 def sigTerm(signum, frame):
+    """SIGTERM handler."""
     quit.set()
 
-def exceptionHook(exctype, value, traceback):
+def exceptionHook(exctype, value, tb):
+    """General exception hook."""
     quit.set()
-    print("ERROR: %s" % value)
+    traceback.print_last()
 
 class poller(Thread):
+    """Poller thead."""
     def __init__(self, event, config):
         Thread.__init__(self)
         self.stopped = event
@@ -73,6 +150,7 @@ class poller(Thread):
         self.calcHeights()
 
     def calcHeights(self):
+        """Calculate boxes heights based on user configured boxes height (only enabled boxes) or number of output lines in router response."""
         for pos, item in enumerate(self.boxconfig):
             column = item.get('column')
             if column not in range(len(heights)):
@@ -91,6 +169,7 @@ class poller(Thread):
                 heights[column].append(len(r[0]) + item.get('padding',0) + 4)
 
     def run(self):
+        """Main router polling loop."""
         while not self.stopped.wait(1):
             for pos, item in enumerate(self.boxconfig):
                 try:
@@ -100,8 +179,13 @@ class poller(Thread):
                     pass
                 if not self.stopped:
                     break
+                if len(r) == 1 and item.get('graph', False):
+                    deques[pos].append(float(list(r[0].values())[0]))
+                    if len(deques[pos]) > item.get('interval'):
+                        deques[pos].popleft()
 
 class GUI(Thread):
+    """TUI thead."""
     def __init__(self, event, config, screen):
         Thread.__init__(self)
         self.stopped = event
@@ -128,10 +212,12 @@ class GUI(Thread):
             self.stdscr.bkgd(curses.color_pair(config.get('color',0)))
 
     def getmaxcol(self):
+        """Get max colums fitting in current terminal."""
         maxy, maxx = self.stdscr.getmaxyx()
         return maxx//(MINWIDTH+2)
 
     def drawBoxes(self):
+        """Draws boxes (that doesn't exceed terminal size)."""
         maxy, maxx = self.stdscr.getmaxyx()
         maxc = self.getmaxcol()
         width = (maxx-2)//maxc
@@ -146,29 +232,42 @@ class GUI(Thread):
             self.boxes[pos].bkgd(' ', curses.color_pair(item.get('color',0)))
             self.boxes[pos].attroff(curses.color_pair(item.get('color',0)))
 
+    def nbsleep(self, duration, check_interval=0.1):
+        """Non-blocking sleep that checks for event flags during the sleep duration."""
+        elapsed = 0
+        while elapsed < duration:
+            if resize.is_set() or quit.is_set():
+                break
+            time.sleep(check_interval)
+            elapsed += check_interval
+
+    def warnBox(self, text):
+        """Warning box."""
+        maxy, maxx = self.stdscr.getmaxyx()
+        warn = curses.newwin(7, 38, maxy//2 - 4, maxx//2 - 19)
+        warn.attron(curses.color_pair(self.config.get('color',0)))
+        warn.box()
+        warn.bkgd(' ', curses.color_pair(self.config.get('color',0)))
+        warn.addstr(3, 2, text, curses.color_pair(self.config.get('color',0)))
+        warn.attroff(curses.color_pair(self.config.get('color',0)))
+        self.stdscr.border(0)
+        self.stdscr.refresh()
+        warn.refresh()
+        self.nbsleep(5)
+
     def checkResize(self):
+        """Check if terminal has been resized, show a warning if terminal it's too small for all boxes and prune exceeding boxes."""
         if resize.is_set():
             resize.clear()
-
             self.stdscr.refresh()
             self.stdscr.clear()
+            self.stdscr.nodelay(True)
             miny, minx = getminyx()
             maxy, maxx = self.stdscr.getmaxyx()
             self.stdscr.refresh()
             self.stdscr.bkgd(curses.color_pair(self.config.get('color',0)))
             if miny > maxy or minx > maxx:
-
-                warn = curses.newwin(7, 38, maxy//2 - 4, maxx//2 - 19)
-                warn.attron(curses.color_pair(self.config.get('color',0)))
-                warn.box()
-                warn.bkgd(' ', curses.color_pair(self.config.get('color',0)))
-                warn.addstr(3, 2, "Warning! Terminal size too small!", curses.color_pair(self.config.get('color',0)))
-                warn.attroff(curses.color_pair(self.config.get('color',0)))
-                self.stdscr.border(0)
-                self.stdscr.refresh()
-                warn.refresh()
-                time.sleep(3)
-
+                self.warnBox('Warning! Terminal size too small!')
             self.stdscr.clear()
             self.boxconfig = list(filter(lambda x: x.get('disabled', False) == False and x.get('column') < self.getmaxcol(), sorted(self.config.get('boxes',[]), key=lambda x: x['column'])))
             self.drawBoxes()
@@ -177,10 +276,12 @@ class GUI(Thread):
             self.stdscr.nodelay(True)
 
     def checkExceed(self, column, pos):
+        """Check if box exceed terminal size."""
         maxy, maxx = self.stdscr.getmaxyx()
         return (geth(pos) + gety(column, pos) + 1 > maxy - 2)
 
     def run(self):
+        """Main TUI loop."""
         while not self.stopped.wait(1):
             key = self.stdscr.getch()
             if key == ord('q') or key == 27:
@@ -220,24 +321,10 @@ class GUI(Thread):
                                 pass
                 else:
                     if item.get('gauge', False):
-                        v = float(list(r[0].values())[0])
-                        from random import randrange
-                        text = ' %d %s' % (v, item.get('units'))
-                        c = int((boxw/100.0) * (100.0/(item.get('max')-item.get('min'))*abs(v-item.get('min'))) - 4 - len(text))
-                        self.boxes[pos].addstr(2, 1, ' ' * (boxw - 2), curses.color_pair(item.get('color',0)))
-                        self.boxes[pos].addstr(2, 2, '█' * c + text, curses.color_pair(item.get('color',0)))
+                        text = textGauge(float(list(r[0].values())[0]), width=boxw - 4, min=item.get('min'), max=item.get('max'), units=item.get('units'))
+                        self.boxes[pos].addstr(2, 2, text, curses.color_pair(item.get('color',0)))
                     elif item.get('graph', False):
-                        v = float(list(r[0].values())[0])
-                        deques[pos].append(v)
-                        if len(deques[pos]) > item.get('interval'):
-                            deques[pos].popleft()
-                        lines = plot(deques[pos], {'format':'{:4.0f}', 'height': boxh - 5, 'minimum': item.get('min'), 'maximum': item.get('max')}).split('\n')
-                        lines.append(' ' * (len('{:4.0f}'.format(0)) + 1) + '└' + '┬' * 60)
-                        x = list(range(-item.get('interval',60)+1,1))
-                        textmin = '%d' % min(x)
-                        textmax = '%d' % max(x)
-                        units = item.get('units')
-                        lines.append(' ' * (len('{:4.0f}'.format(0)) + 1) + textmin + ' ' * (60//2 - len(textmin)) + units + ' ' * (60//2 - len(units)) + textmax)
+                        lines = textPlot(deques[pos], width=boxw - 14, height=boxh - 6, samples=item.get('interval',60), units=item.get('units'), type=item.get('type'), format="{:4.0f}")
                         y = 1
                         for line in lines:
                             y += 1
@@ -261,9 +348,10 @@ class GUI(Thread):
                             except curses.error:
                                 pass
                 self.boxes[pos].refresh()
-            self.status()
+            self.statusBar()
 
-    def status(self):
+    def statusBar(self):
+        """Status bar."""
         maxy, maxx = self.stdscr.getmaxyx()
         self.stdscr.addstr(maxy - 2, 1, " " * (maxx - 2), curses.color_pair(self.config.get('color',0)) | curses.A_BOLD | curses.A_REVERSE)
         self.stdscr.addstr(maxy - 2, 1, "MONITORING %s (%s)" % (self.config.get('ros').get('address'), self.config.get('ros').get('user')), curses.color_pair(self.config.get('color',0)) | curses.A_BOLD | curses.A_REVERSE)
@@ -274,6 +362,7 @@ class GUI(Thread):
         self.stdscr.refresh()
 
 def main(screen):
+    """main() curses wrapped."""
     cfgfile = "%s.json" % sys.argv[0]
     if len(sys.argv) > 1:
         cfgfile = sys.argv[1]

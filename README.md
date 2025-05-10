@@ -26,10 +26,10 @@ Main sections are:
 ## Requirements
 
 This project uses these modules:
- * [asciichartpy](https://github.com/kroitor/asciichart)
+ * [numpy](https://github.com/numpy/numpy)
  * [ros_api](https://github.com/LaiArturs/RouterOS_API)
  * [tabulate](https://github.com/astanin/python-tabulate)
 
 ## TODO
 
-There is a lot to do, yet! Enrich this README, avoid *globals*, further and better exception handling, maybe comments in the code...
+There is a lot to do, yet! Enrich this README, avoid *globals*, further and better exception handling, more comments in the code...

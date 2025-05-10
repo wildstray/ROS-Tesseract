@@ -77,7 +77,8 @@
          "units":"seconds",
          "interval":60,
          "height":24,
-         "disabled":true
+         "type": "bars",
+         "disabled":false
       },
       {
          "name":"Cell monitor",
@@ -96,7 +97,7 @@
          "name":"IP address",
          "query":[
             "/ip/address/print",
-            "=.proplist=address,network,interface,dynamic",
+            "=.proplist=address,network,interface,dynamic,disabled",
             "?disabled=no"
          ],
          "column":2,
