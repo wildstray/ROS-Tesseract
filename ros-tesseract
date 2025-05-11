@@ -25,25 +25,28 @@ results = defaultdict(list)
 quit = Event()
 resize = Event()
 
-def textGauge(value, width=50, min=0, max=100, units=None):
+def textGauge(value, width=50, vmin=0, vmax=100, units=None):
     # Creates a text-bases gauge
     descr = " %d %s" % (value, units)
-    stars = int(((width-len(descr)-2)/100.0)*(100.0/(max-min)*abs(value-min)))
+    stars = int(((width-len(descr)-2)/100.0)*(100.0/(vmax-vmin)*abs(value-vmin)))
     spaces = width-stars-len(descr)-2
     gauge = "[%s%s%s]" % ("*"*stars, " "*spaces, descr)
     return gauge
 
-def textPlot(data, width=50, height=20, samples=60, type="line", units="", format=".1f"):
+def textPlot(data, width=50, height=20, vmin=None, vmax=None, samples=60, type="line", units="", format=".1f"):
     # Creates a text-bases line or bars plot
 
     # Scale settings
     data_min = min(data)
     data_max = max(data)
-    if data_min == data_max:
-        data_min = np.mean(data) - abs(np.mean(data)//10)
-        data_max = np.mean(data) + abs(np.mean(data)//10)
+    if abs(data_max - data_min) < 5:
+        data_min = np.mean(data) - abs(np.mean(data)//25)
+        data_max = np.mean(data) + abs(np.mean(data)//25)
+    if min and max:
+        data_min = vmin
+        data_max = vmax
     data_range = abs(data_max - data_min)
-    y_scale = height / data_range
+    y_scale = (height - 1) / data_range
     x_scale = samples / width
 
     # Create empty plot
@@ -66,9 +69,9 @@ def textPlot(data, width=50, height=20, samples=60, type="line", units="", forma
         x_interpolated = np.linspace(0, len(data) - 1, width * 10)
         data_interpolated = np.interp(x_interpolated, x_original, data)
         for i in range(width * 10):
-            x_idx = int(i / 10)
-            if x_idx >= len(data):
+            if int(i / 10 * x_scale) >= len(data):
                 continue
+            x_idx = int(i / 10)
             y_val = data_interpolated[i]
             y_idx = height - 1 - int((y_val - data_min - 2) * y_scale)
             if 0 <= x_idx < width and 0 <= y_idx < height:
@@ -124,7 +127,7 @@ def exceptionHook(exctype, value, tb):
     traceback.print_last()
 
 class poller(Thread):
-    """Poller thead."""
+    """Poller thread."""
     def __init__(self, event, config):
         Thread.__init__(self)
         self.stopped = event
@@ -185,7 +188,7 @@ class poller(Thread):
                         deques[pos].popleft()
 
 class GUI(Thread):
-    """TUI thead."""
+    """TUI thread."""
     def __init__(self, event, config, screen):
         Thread.__init__(self)
         self.stopped = event
@@ -327,11 +330,11 @@ class GUI(Thread):
                 else:
                     if item.get('gauge', False):
                         """Show box with a gauge for a single reading"""
-                        text = textGauge(float(list(r[0].values())[0]), width=boxw - 4, min=item.get('min'), max=item.get('max'), units=item.get('units'))
+                        text = textGauge(float(list(r[0].values())[0]), width=boxw - 4, vmin=item.get('min'), vmax=item.get('max'), units=item.get('units'))
                         self.boxes[pos].addstr(2, 2, text, curses.color_pair(item.get('color',0)))
                     elif item.get('graph', False):
                         """Show box with a plot for a single reading"""
-                        lines = textPlot(deques[pos], width=boxw - 14, height=boxh - 6, samples=item.get('interval',60), units=item.get('units'), type=item.get('type'), format="{:4.0f}")
+                        lines = textPlot(deques[pos], width=boxw - 14, height=boxh - 6, samples=item.get('interval',60), vmin=item.get('min'), vmax=item.get('max'), units=item.get('units'), type=item.get('type'), format="{:4.0f}")
                         y = 1
                         for line in lines:
                             y += 1
