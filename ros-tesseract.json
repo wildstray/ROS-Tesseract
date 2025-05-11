@@ -74,7 +74,7 @@
          "graph":true,
          "min":-120,
          "max":-60,
-         "units":"seconds",
+         "units":"dBm",
          "interval":60,
          "height":24,
          "type": "bars",

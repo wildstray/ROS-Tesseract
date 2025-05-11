@@ -88,7 +88,7 @@ def textPlot(data, width=50, height=20, samples=60, type="line", units="", forma
                     canvas[y_idx][i + 6] = "*"
 
     # Add X-axis label
-    canvas[height + 1] = " " * 6 + " " * (width//2-len(units)//2) + units
+    canvas[height + 1] = " " * 6 + "Y units: %s last: %s avg: %s stddev: %s X units: seconds" % (units, format.format(data[-1]), format.format(np.mean(data)), format.format(np.std(data)))
 
     return ["".join(row) for row in canvas]
 
@@ -194,6 +194,7 @@ class GUI(Thread):
         self.boxes = defaultdict(list)
         self.boxconfig = list(filter(lambda x: x.get('disabled', False) == False and x.get('column') < self.getmaxcol(), sorted(self.config.get('boxes',[]), key=lambda x: x['column'])))
 
+        """Init curses."""
         self.stdscr.nodelay(True)
         curses.noecho()
         curses.cbreak()
@@ -203,6 +204,7 @@ class GUI(Thread):
         self.stdscr.border(0)
         curses.curs_set(0)
 
+        """Init curses colors."""
         colors = {"COLOR_BLACK": curses.COLOR_BLACK, "COLOR_RED": curses.COLOR_RED, "COLOR_GREEN": curses.COLOR_GREEN, 
                   "COLOR_YELLOW": curses.COLOR_YELLOW, "COLOR_BLUE": curses.COLOR_BLUE, "COLOR_MAGENTA": curses.COLOR_MAGENTA,
                   "COLOR_CYAN": curses.COLOR_CYAN, "COLOR_WHITE": curses.COLOR_WHITE}
@@ -283,6 +285,7 @@ class GUI(Thread):
     def run(self):
         """Main TUI loop."""
         while not self.stopped.wait(1):
+            """Check for keypress, if ESC or q."""
             key = self.stdscr.getch()
             if key == ord('q') or key == 27:
                 quit.set()
@@ -292,13 +295,15 @@ class GUI(Thread):
                 column = item.get('column',0)
                 if self.checkExceed(column, pos):
                     continue
-                self.boxes[pos].bkgd(' ', curses.color_pair(item.get('color',0)))
+                self.boxes[pos].erase()
+                self.boxes[pos].border(0)
                 self.boxes[pos].addstr(0, 1, "[ %s ]" % item.get('name'), curses.A_BOLD | curses.color_pair(item.get('color',0)))
                 r = results[pos]
                 if r == []:
                     continue
                 boxh, boxw = self.boxes[pos].getmaxyx()
                 if len(r) > 1:
+                    """Show box with tabular content, with 2 columns"""
                     r = list(filter(lambda x: x.get('.section') != '0', r))
                     r = list(map(lambda x: dict(filter(lambda item: not item[0].startswith('.'), x.items())), r))
                     table = list(map(lambda x: x.values(), r))
@@ -321,9 +326,11 @@ class GUI(Thread):
                                 pass
                 else:
                     if item.get('gauge', False):
+                        """Show box with a gauge for a single reading"""
                         text = textGauge(float(list(r[0].values())[0]), width=boxw - 4, min=item.get('min'), max=item.get('max'), units=item.get('units'))
                         self.boxes[pos].addstr(2, 2, text, curses.color_pair(item.get('color',0)))
                     elif item.get('graph', False):
+                        """Show box with a plot for a single reading"""
                         lines = textPlot(deques[pos], width=boxw - 14, height=boxh - 6, samples=item.get('interval',60), units=item.get('units'), type=item.get('type'), format="{:4.0f}")
                         y = 1
                         for line in lines:
@@ -335,6 +342,7 @@ class GUI(Thread):
                             except curses.error:
                                 pass
                     else:
+                        """Show box with tabular content, with more then 2 columns"""
                         table = list(map(lambda x: [x, r[0][x]], r[0]))
                         table.append([' '*20])
                         headers = []
@@ -349,6 +357,7 @@ class GUI(Thread):
                                 pass
                 self.boxes[pos].refresh()
             self.statusBar()
+            self.stdscr.refresh()
 
     def statusBar(self):
         """Status bar."""
@@ -359,7 +368,6 @@ class GUI(Thread):
         self.stdscr.addstr(maxy - 2, maxx//2-len(term)//2 - 1, term, curses.color_pair(self.config.get('color',0)) | curses.A_BOLD | curses.A_REVERSE)
         dt = datetime.datetime.today().strftime('%x %X')
         self.stdscr.addstr(maxy - 2, maxx - len(dt) - 1, "%s" % dt, curses.color_pair(self.config.get('color',0)) | curses.A_BOLD | curses.A_REVERSE)
-        self.stdscr.refresh()
 
 def main(screen):
     """main() curses wrapped."""
@@ -367,6 +375,7 @@ def main(screen):
     if len(sys.argv) > 1:
         cfgfile = sys.argv[1]
 
+    """read configuration file."""
     with open(cfgfile) as f:
         try:
             config = json.load(f)
@@ -380,11 +389,13 @@ def main(screen):
         print('Please configure some monitor box!')
         sys.exit(1)
 
+    """init hooks for excetions and signals."""
     sys.excepthook = exceptionHook
     signal.signal(signal.SIGWINCH, sigWinch)
     signal.signal(signal.SIGINT, sigInt)
     signal.signal(signal.SIGTERM, sigTerm)
 
+    """init and starts threads for GUI and poller."""
     tPoller = poller(quit, config)
     tGUI = GUI(quit, config, screen)
     resize.set()
